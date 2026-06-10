@@ -2,6 +2,7 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi import _rate_limit_exceeded_handler
@@ -47,11 +48,11 @@ app.include_router(admin.router,      prefix=api)
 @app.on_event("startup")
 def on_startup() -> None:
     """
-    Create DB tables on first boot (dev convenience).
-    Wrapped in try/except so a missing DB does NOT crash the worker process —
-    the server stays up and /api/health reports the degraded state instead.
+    Create tables on first boot (dev convenience).
+    Wrapped so a DB hiccup at startup does not crash the worker process —
+    the server stays up and /api/health reports the real state instead.
 
-    For production: replace with `alembic upgrade head` in your deploy pipeline.
+    Production: replace with `alembic upgrade head` in your deploy pipeline.
     """
     try:
         Base.metadata.create_all(bind=engine)
@@ -63,21 +64,14 @@ def on_startup() -> None:
 # ── Health ────────────────────────────────────────────────────────────────────
 @app.get("/api/health")
 def health():
-    """
-    Liveness + readiness probe.
 
-    Returns:
-        200  {"status": "ok",       "db": "ok"}           — fully healthy
-        200  {"status": "degraded", "db": "<error msg>"}  — DB unreachable
-    """
     try:
         with SessionLocal() as db:
             db.execute(text("SELECT 1"))
-        db_status = "ok"
-    except Exception as exc:                          
-        db_status = str(exc)
-
-    return {
-        "status": "ok" if db_status == "ok" else "degraded",
-        "db": db_status,
-    }
+        return {"status": "ok", "db": "ok"}
+    except Exception as exc:                         
+        logger.warning("Health check: DB unreachable — %s", exc)
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "db": str(exc)},
+        )
