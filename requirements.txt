@@ -13,3 +13,7 @@ cryptography==43.*
 
 slowapi==0.1.9
 email-validator==2.*
+
+# Admin export features (PDF / Excel)
+reportlab==4.*
+openpyxl==3.*

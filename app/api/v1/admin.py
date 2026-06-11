@@ -12,6 +12,8 @@ from app.models.entities import (
     SubmissionStatus,
 )
 from app.schemas.api import ContactOut, StatusUpdateIn, SubmissionOut
+from app.services.excel_export import build_all_users_xlsx
+from app.services.pdf_export import build_all_users_pdf, build_user_pdf
 from app.services.storage import read_decrypted
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(decode_token)])
@@ -109,3 +111,78 @@ def download_kyc(document_id: str, db: Session = Depends(get_db), actor: str = D
 @router.get("/contact-messages", response_model=list[ContactOut])
 def list_contact_messages(db: Session = Depends(get_db)):
     return db.scalars(select(ContactMessage).order_by(ContactMessage.created_at.desc())).all()
+
+
+def _messages_for_email(db: Session, email: str) -> list[ContactMessage]:
+    return db.scalars(
+        select(ContactMessage)
+        .where(func.lower(ContactMessage.email) == email.lower())
+        .order_by(ContactMessage.created_at.asc())
+    ).all()
+
+
+@router.get("/submissions/{submission_id}/export-pdf")
+def export_submission_pdf(submission_id: str, db: Session = Depends(get_db), actor: str = Depends(decode_token)):
+    """Single-user case-file PDF: onboarding info + KYC list + every support
+    message sent from that user's email address."""
+    sub = db.get(
+        OnboardingSubmission,
+        submission_id,
+        options=[selectinload(OnboardingSubmission.kyc_documents)],
+    )
+    if sub is None:
+        raise HTTPException(404, "Submission not found.")
+
+    messages = _messages_for_email(db, sub.email)
+    pdf_bytes = build_user_pdf(sub, messages)
+    _audit(db, actor, "submission.export_pdf", submission_id)
+
+    filename = f"{sub.reference_code}-{sub.full_name.replace(' ', '_')}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/export/all.pdf")
+def export_all_pdf(db: Session = Depends(get_db), actor: str = Depends(decode_token)):
+    """Combined PDF archive — one section per submission, with onboarding
+    info, KYC list and support messages for every user."""
+    submissions = db.scalars(
+        select(OnboardingSubmission)
+        .options(selectinload(OnboardingSubmission.kyc_documents))
+        .order_by(OnboardingSubmission.created_at.desc())
+    ).all()
+
+    rows = [(sub, _messages_for_email(db, sub.email)) for sub in submissions]
+    pdf_bytes = build_all_users_pdf(rows)
+    _audit(db, actor, "export.all_pdf", f"{len(submissions)} submissions")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="bat-all-submissions.pdf"'},
+    )
+
+
+@router.get("/export/all.xlsx")
+def export_all_xlsx(db: Session = Depends(get_db), actor: str = Depends(decode_token)):
+    """Combined Excel workbook — Submissions, KYC Documents and Support
+    Messages sheets, covering every user in a single downloadable file."""
+    submissions = db.scalars(
+        select(OnboardingSubmission)
+        .options(selectinload(OnboardingSubmission.kyc_documents))
+        .order_by(OnboardingSubmission.created_at.desc())
+    ).all()
+    kyc_documents = db.scalars(select(KycDocument)).all()
+    messages = db.scalars(select(ContactMessage).order_by(ContactMessage.created_at.asc())).all()
+
+    xlsx_bytes = build_all_users_xlsx(submissions, kyc_documents, messages)
+    _audit(db, actor, "export.all_xlsx", f"{len(submissions)} submissions")
+
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="bat-all-submissions.xlsx"'},
+    )
